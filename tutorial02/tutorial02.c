@@ -26,14 +26,15 @@
 *
 **/
 
-#include <unistd.h>
+
 #include <stdio.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/imgutils.h>
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
-#include <SDL2/SDL.h>
-#include <SDL2/SDL_thread.h>
+
+#include <SDL.h>
+#include <SDL_thread.h>
 
 void printHelpMenu();
 

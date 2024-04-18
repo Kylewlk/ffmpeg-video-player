@@ -36,12 +36,14 @@
 #include <libavfilter/avfilter.h>
 #include <libavfilter/buffersink.h>
 #include <libavfilter/buffersrc.h>
+#include <libavcodec/avcodec.h>
 
 #include <SDL.h>
 #include <SDL_thread.h>
 
 #ifdef _WIN32
 #include <windows.h>
+
 #endif
 
 /**
@@ -3567,7 +3569,8 @@ AVDictionary **setup_find_stream_info_opts(AVFormatContext *s,
 
     if (!s->nb_streams)
         return NULL;
-    opts = av_mallocz_array(s->nb_streams, sizeof(*opts));
+    opts = av_malloc_array(s->nb_streams, sizeof(*opts));
+    memset(opts, 0, sizeof(*opts));
     if (!opts) {
         av_log(NULL, AV_LOG_ERROR,
                "Could not alloc memory for stream options.\n");
