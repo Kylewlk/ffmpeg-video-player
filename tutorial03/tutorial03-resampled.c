@@ -19,7 +19,7 @@
 *
 **/
 
-#include <unistd.h>
+//#include <unistd.h>
 #include <stdio.h>
 #include <assert.h>
 #include <libavcodec/avcodec.h>
@@ -28,8 +28,8 @@
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
-#include <SDL2/SDL.h>
-#include <SDL2/SDL_thread.h>
+#include <SDL.h>
+#include <SDL_thread.h>
 
 /* Prevents SDL from overriding main() */
 #ifdef __MINGW32__
@@ -64,7 +64,7 @@ void packet_queue_init(PacketQueue * q);
 
 int packet_queue_put(
         PacketQueue * queue,
-        AVPacket * packet
+        AVPacket * pkt
     );
 
 static int packet_queue_get(
@@ -87,7 +87,7 @@ int audio_decode_frame(
 
 static int audio_resampling(
               AVCodecContext * audio_decode_ctx,
-              AVFrame * audio_decode_frame,
+              AVFrame * decoded_audio_frame,
               enum AVSampleFormat out_sample_fmt,
               int out_channels,
               int out_sample_rate,
@@ -202,13 +202,13 @@ int main(int argc, char * argv[])
     }
 
     // audio specs containers
-    SDL_AudioSpec wanted_specs;
-    SDL_AudioSpec specs;
+    SDL_AudioSpec wanted_specs = {};
+    SDL_AudioSpec specs = {};
 
     // set audio settings from codec info
     wanted_specs.freq = aCodecCtx->sample_rate;
     wanted_specs.format = AUDIO_S16SYS;
-    wanted_specs.channels = aCodecCtx->channels;
+    wanted_specs.channels = aCodecCtx->ch_layout.nb_channels;
     wanted_specs.silence = 0;
     wanted_specs.samples = SDL_AUDIO_BUFFER_SIZE;
     wanted_specs.callback = audio_callback;
@@ -216,6 +216,11 @@ int main(int argc, char * argv[])
 
     // Uint32 audio device id
     SDL_AudioDeviceID audioDeviceID;
+
+    for (int i = 0; i < SDL_GetNumAudioDevices(0); ++i) {
+        printf("Audio Device: %s\n", SDL_GetAudioDeviceName(i, 0));
+        fflush(stdout);
+    }
 
     // open audio device
     audioDeviceID = SDL_OpenAudioDevice(    // [1]
@@ -372,6 +377,11 @@ int main(int argc, char * argv[])
     // current video frame index
     int frameIndex = 0;
 
+    double fps = av_q2d(pFormatCtx->streams[videoStream]->r_frame_rate);
+
+    // get clip sleep time
+    int sleep_time = (int)(1000.0/fps) - 1;
+
     // read data from the AVFormatContext by repeatedly calling av_read_frame()
     while (av_read_frame(pFormatCtx, pPacket) >= 0)
     {
@@ -416,6 +426,11 @@ int main(int argc, char * argv[])
                 // check the number of frames to decode was not exceeded
                 if (++frameIndex <= maxFramesToDecode)
                 {
+                    // sleep: usleep won't work when using SDL_CreateWindow
+                    // usleep(sleep_time);
+                    // Use SDL_Delay in milliseconds to allow for cpu scheduling
+                    SDL_Delay(sleep_time);    // [5]
+
                     // dump information about the frame being rendered
                     printf(
                         "Frame %c (%d) pts %d dts %d key_frame %d [coded_picture_number %d, display_picture_number %d, %dx%d]\n",
@@ -459,6 +474,7 @@ int main(int argc, char * argv[])
                     SDL_RenderPresent(renderer);
                 }
             }
+            av_packet_unref(pPacket);
 
             // exit decoding loop if the number of frames to decode was not exceeded
             if (frameIndex > maxFramesToDecode)
@@ -487,12 +503,9 @@ int main(int argc, char * argv[])
             case SDL_QUIT:
             {
                 printf("SDL_QUIT event received. Quitting.\n");
-
-                // clean up all SDL initialized subsystems
-                SDL_Quit();
-
                 // set global quit flag
                 quit = 1;
+//                exit(2);
             }
             break;
 
@@ -509,11 +522,15 @@ int main(int argc, char * argv[])
           break;
         }
     }
+    quit = 1;
+    SDL_CondSignal(audioq.cond);
+
+    SDL_CloseAudio();
 
     /**
     * Memory Cleanup.
     */
-    av_packet_unref(pPacket);
+//    av_packet_unref(pPacket);
 
     av_frame_free(&pict);
     av_free(pict);
@@ -521,10 +538,26 @@ int main(int argc, char * argv[])
     av_frame_free(&pFrame);
     av_free(pFrame);
 
-    avcodec_close(pCodecCtx);
-    avcodec_close(aCodecCtx);
+//    avcodec_close(pCodecCtx);
+//    avcodec_close(aCodecCtx);
 
     avformat_close_input(&pFormatCtx);
+
+    if (frameIndex > maxFramesToDecode)
+    {
+        while (1)
+        {
+            SDL_PollEvent(&event);
+            if (event.type == SDL_QUIT)
+            {
+                break;
+            }
+            SDL_Delay(2);
+        }
+    }
+
+    SDL_DestroyRenderer(renderer);
+    SDL_Quit();
 
     return 0;
 }
@@ -597,7 +630,8 @@ int packet_queue_put(PacketQueue * q, AVPacket * pkt)
     }
 
     // add reference to the given AVPacket
-    avPacketList->pkt = * pkt;
+    av_packet_move_ref(&avPacketList->pkt, pkt);
+//    avPacketList->pkt = * pkt;
 
     // the new AVPacketList will be inserted at the end of the queue
     avPacketList->next = NULL;
@@ -877,6 +911,8 @@ int audio_decode_frame(AVCodecContext * aCodecCtx, uint8_t * audio_buf, int buf_
                                 aCodecCtx->sample_rate,
                                 audio_buf
                             );
+//                data_size = avFrame->linesize[0];
+//                memcpy(audio_buf, avFrame->data[0], data_size);
 
                 assert(data_size <= buf_size);
             }
@@ -961,10 +997,11 @@ static int audio_resampling(                                  // 1
     }
 
     // get input audio channels
-    in_channel_layout = (audio_decode_ctx->channels ==
-                     av_get_channel_layout_nb_channels(audio_decode_ctx->channel_layout)) ?   // 2
-                     audio_decode_ctx->channel_layout :
-                     av_get_default_channel_layout(audio_decode_ctx->channels);
+//    in_channel_layout = (audio_decode_ctx->channels ==
+//                     av_get_channel_layout_nb_channels(audio_decode_ctx->channel_layout)) ?   // 2
+//                     audio_decode_ctx->channel_layout :
+//                     av_get_default_channel_layout(audio_decode_ctx->channels);
+    in_channel_layout = av_channel_layout_check(&audio_decode_ctx->ch_layout);
 
     // check input audio channels correctly retrieved
     if (in_channel_layout <= 0)
