@@ -2,7 +2,8 @@
 // Created by DELL on 2024/4/19.
 //
 
-#include <stdio.h>
+#include <iostream>
+#include <cstdio>
 
 #include "SDL.h"
 
@@ -40,14 +41,14 @@ static  Uint8* audio_pos;
 
 SDL_Window* sdlWindow = nullptr;
 SDL_Renderer* sdlRender = nullptr;
-SDL_Texture* sdlTtexture = nullptr;
+SDL_Texture* sdlTexture = nullptr;
 
 
-AVFormatContext* ifmt_ctx = NULL;
+AVFormatContext* ifmt_ctx = nullptr;
 AVPacket* pkt;
 AVFrame* video_frame, * audio_frame;
 int ret;
-int videoindex = -1, audioindex = -1;
+int videoIndex = -1, audioIndex = -1;
 
 int frame_width = 1280;
 int frame_height = 720;
@@ -80,8 +81,8 @@ PacketQueue audio_pkt_queue;
 int av_sync_type = AV_SYNC_AUDIO_MASTER;
 
 int64_t audio_callback_time;
-float audio_clock;
-float video_clock;
+double audio_clock;
+double video_clock;
 
 //SDL音频参数结构
 SDL_AudioSpec wanted_spec;
@@ -91,7 +92,7 @@ void closeSDL();
 void  fill_audio_pcm2(void* udata, Uint8* stream, int len);
 
 //fltp转为packed形式
-void fltp_convert_to_f32le(float* f32le, float* fltp_l, float* fltp_r, int nb_samples, int channels)
+void fltp_convert_to_f32le(float* f32le, const float* fltp_l, const float* fltp_r, int nb_samples, int channels)
 {
     for (int i = 0; i < nb_samples; i++)
     {
@@ -103,7 +104,6 @@ void fltp_convert_to_f32le(float* f32le, float* fltp_l, float* fltp_r, int nb_sa
 //将一个压缩数据包放入相应的队列中
 void put_AVPacket_into_queue(PacketQueue *q, AVPacket* packet)
 {
-    SDL_LockMutex(q->mutex);
     AVPacketList* temp = nullptr;
     temp = (AVPacketList*)av_malloc(sizeof(AVPacketList));
     if (!temp)
@@ -113,7 +113,9 @@ void put_AVPacket_into_queue(PacketQueue *q, AVPacket* packet)
     }
 
     temp->pkt =  *packet;
-    temp->next = NULL;
+    temp->next = nullptr;
+
+    SDL_LockMutex(q->mutex);
 
     if (!q->last_pkt)
         q->first_pkt = temp;
@@ -139,7 +141,7 @@ static void packet_queue_get(PacketQueue* q,AVPacket *pkt2)
             q->first_pkt = pkt1->next;
 
             if (!q->first_pkt)
-                q->last_pkt = NULL;
+                q->last_pkt = nullptr;
 
             q->nb_packets--;
             SDL_UnlockMutex(q->mutex);
@@ -156,22 +158,24 @@ static void packet_queue_get(PacketQueue* q,AVPacket *pkt2)
             SDL_Delay(1);
 
     }
-
-    return;
 }
 
 int delCunt = 0;
 int video_play_thread(void * data)
 {
-    AVPacket video_packt = {0};
+    AVPacket video_packet{};
+
+    double fps = av_q2d(ifmt_ctx->streams[videoIndex]->r_frame_rate);
+    double frameDuration = 1000.0/fps; // milliseconds
+
     //取数据
     while (true)
     {
         //取数据包
 
-        packet_queue_get(&video_pkt_queue, &video_packt);
+        packet_queue_get(&video_pkt_queue, &video_packet);
 
-        ret = avcodec_send_packet(video_codecContent, &video_packt);
+        ret = avcodec_send_packet(video_codecContent, &video_packet);
         if (ret < 0) {
             fprintf(stderr, "Error sending a packet for decoding, %s\n", av_err2str(ret));
             continue;
@@ -190,11 +194,10 @@ int video_play_thread(void * data)
             //printf(" frame num %3d\n", video_codecContent->frame_number);
             fflush(stdout);
 
-            video_clock = av_q2d(video_codecContent->time_base) * video_codecContent->ticks_per_frame * 1000 * video_codecContent->frame_number;
+            video_clock = frameDuration * static_cast<double>(video_codecContent->frame_num);
             //printf("视频帧pts: %f ms\n", video_clock);
-            float duration = av_q2d(video_codecContent->time_base) * video_codecContent->ticks_per_frame * 1000;
 
-            SDL_UpdateYUVTexture(sdlTtexture, nullptr,
+            SDL_UpdateYUVTexture(sdlTexture, nullptr,
                                  video_frame->data[0], video_frame->linesize[0],
                                  video_frame->data[1], video_frame->linesize[1],
                                  video_frame->data[2], video_frame->linesize[2]);
@@ -203,23 +206,23 @@ int video_play_thread(void * data)
             //清理渲染器缓冲区
             SDL_RenderClear(sdlRender);
             //将纹理拷贝到窗口渲染平面上
-            SDL_RenderCopy(sdlRender, sdlTtexture, NULL, nullptr);
+            SDL_RenderCopy(sdlRender, sdlTexture, NULL, nullptr);
             //翻转缓冲区，前台显示
             SDL_RenderPresent(sdlRender);
 
             //延时处理
-            float delay = duration;
-            float diff = video_clock - audio_clock;
-            if (fabs(diff) <= duration) //时间差在一帧范围内表示正常，延时正常时间
-                delay = duration;
-            else if (diff > duration) //视频时钟比音频时钟快，且大于一帧的时间，延时2倍
+            double delay = frameDuration;
+            double diff = video_clock - audio_clock;
+            if (fabs(diff) <= frameDuration) //时间差在一帧范围内表示正常，延时正常时间
+                delay = frameDuration;
+            else if (diff > frameDuration) //视频时钟比音频时钟快，且大于一帧的时间，延时2倍
                 delay *= 2;
-            else if (diff < -duration) //视频时钟比音频时钟慢，且超出一帧时间，立即播放当前帧
+            else if (diff < -frameDuration) //视频时钟比音频时钟慢，且超出一帧时间，立即播放当前帧
                 delay = 1;
 
-            printf("帧数：%d 延时: %f\n", video_codecContent->frame_number, delay);
+            printf("帧数：%lld 延时: %f ms\n", video_codecContent->frame_num, delay);
 
-            SDL_Delay(delay);
+            SDL_Delay( static_cast<uint32_t>(delay));
         }
     }
 
@@ -282,22 +285,19 @@ int audio_play_thread(void* data)
             free(pcm_buffer);
         }
     }
-
-    return 0;
 }
-
 
 int open_file_thread(void* data)
 {
     //读取
     while (av_read_frame(ifmt_ctx, pkt) >= 0)
     {
-        if (pkt->stream_index == videoindex) {
+        if (pkt->stream_index == videoIndex) {
 
             //加入视频队列
             put_AVPacket_into_queue(&video_pkt_queue, pkt);
         }
-        else if (pkt->stream_index == audioindex)
+        else if (pkt->stream_index == audioIndex)
         {
             //加入音频队列
             put_AVPacket_into_queue(&audio_pkt_queue, pkt);
@@ -311,29 +311,31 @@ int open_file_thread(void* data)
 
 int main(int argc, char * argv[])
 {
+    std::locale::global(std::locale(".utf8"));
+
     if (argc < 2)
     {
-        printf("Please set input file.");
+        SDL_LogError(0, "Please set input file.");
         return -1;
     }
     const char* in_filename = argv[1];
 
-    if ((ret = avformat_open_input(&ifmt_ctx, in_filename, 0, 0)) < 0) {
-        printf("Could not open input file.");
+    if ((ret = avformat_open_input(&ifmt_ctx, in_filename, nullptr, nullptr)) < 0) {
+        SDL_LogError(0, "Could not open input file.");
         return -1;
     }
 
-    if ((ret = avformat_find_stream_info(ifmt_ctx, 0)) < 0) {
-        printf("Failed to retrieve input stream information");
+    if ((ret = avformat_find_stream_info(ifmt_ctx, nullptr)) < 0) {
+        SDL_LogError(0, "Failed to retrieve input stream information");
         return -1;
     }
 
-    videoindex = -1;
+    videoIndex = -1;
     for (int i = 0; i < ifmt_ctx->nb_streams; i++) { //nb_streams：视音频流的个数
         if (ifmt_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO)
-            videoindex = i;
+            videoIndex = i;
         else if (ifmt_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO)
-            audioindex = i;
+            audioIndex = i;
     }
 
     printf("\nInput Video===========================\n");
@@ -341,29 +343,29 @@ int main(int argc, char * argv[])
     printf("\n======================================\n");
 
     //根据编解码器id查询解码器并返回解码器结构
-    video_codec = avcodec_find_decoder(ifmt_ctx->streams[videoindex]->codecpar->codec_id);
+    video_codec = avcodec_find_decoder(ifmt_ctx->streams[videoIndex]->codecpar->codec_id);
 
     //分配解码器上下文
     video_codecContent = avcodec_alloc_context3(video_codec);
     //拷贝视频流信息到视频编码器上下文中
-    avcodec_parameters_to_context(video_codecContent, ifmt_ctx->streams[videoindex]->codecpar);
+    avcodec_parameters_to_context(video_codecContent, ifmt_ctx->streams[videoIndex]->codecpar);
 
-    frame_width = ifmt_ctx->streams[videoindex]->codecpar->width;
-    frame_height = ifmt_ctx->streams[videoindex]->codecpar->height;
+    frame_width = ifmt_ctx->streams[videoIndex]->codecpar->width;
+    frame_height = ifmt_ctx->streams[videoIndex]->codecpar->height;
     //打开视频解码器和关联解码器上下文
     if (avcodec_open2(video_codecContent, video_codec, nullptr))
     {
-        printf("could not open codec!\n");
+        SDL_LogError(0, "could not open codec!\n");
         return -1;
     }
 
     //根据编解码器id查询解码器并返回解码器结构
-    audio_codec = avcodec_find_decoder(ifmt_ctx->streams[audioindex]->codecpar->codec_id);
+    audio_codec = avcodec_find_decoder(ifmt_ctx->streams[audioIndex]->codecpar->codec_id);
 
     //分配解码器上下文
     audio_codecContent = avcodec_alloc_context3(audio_codec);
     //拷贝音频流信息到音频编码器上下文中
-    avcodec_parameters_to_context(audio_codecContent, ifmt_ctx->streams[audioindex]->codecpar);
+    avcodec_parameters_to_context(audio_codecContent, ifmt_ctx->streams[audioIndex]->codecpar);
     //打开音频解码器和关联解码器上下文
     if (avcodec_open2(audio_codecContent, audio_codec, nullptr))
     {
@@ -388,13 +390,13 @@ int main(int argc, char * argv[])
     //设置SDL音频播放参数
     wanted_spec.freq = audio_codecContent->sample_rate; //采样率
     wanted_spec.format = AUDIO_F32LSB; // audio_codecContent->sample_fmt;  这里需要转换为sdl的采样格式
-    wanted_spec.channels = audio_codecContent->channels; //通道数
+    wanted_spec.channels = audio_codecContent->ch_layout.nb_channels; //通道数
     wanted_spec.silence = 0;
     wanted_spec.samples = audio_codecContent->frame_size;   //每一帧的采样点数量
     wanted_spec.callback = fill_audio_pcm2; //音频播放回调
 
     //打开系统音频设备
-    if (SDL_OpenAudio(&wanted_spec, NULL) < 0) {
+    if (SDL_OpenAudio(&wanted_spec, nullptr) < 0) {
         printf("can't open audio.\n");
         return -1;
     }
@@ -407,7 +409,7 @@ int main(int argc, char * argv[])
 
     bool quit = false;
     SDL_Event e;
-    while (quit == false)
+    while (!quit)
     {
         while (SDL_PollEvent(&e) != 0)
         {
@@ -419,6 +421,7 @@ int main(int argc, char * argv[])
         }
     }
 
+    SDL_CloseAudio();
 
     SDL_DestroyMutex(video_pkt_queue.mutex);
     SDL_DestroyMutex(audio_pkt_queue.mutex);
@@ -430,6 +433,9 @@ int main(int argc, char * argv[])
     av_frame_free(&audio_frame);
     av_frame_free(&video_frame);
     av_packet_free(&pkt);
+
+    closeSDL();
+
     return 0;
 }
 
@@ -440,7 +446,7 @@ int initSdl()
 {
     bool success = true;
 
-    if (SDL_Init(SDL_INIT_VIDEO))
+    if (SDL_Init(SDL_INIT_TIMER|SDL_INIT_AUDIO|SDL_INIT_VIDEO|SDL_INIT_EVENTS))
     {
         printf("init sdl error:%s\n", SDL_GetError());
         success = false;
@@ -463,7 +469,7 @@ int initSdl()
     }
 
     //构建合适的纹理
-    sdlTtexture = SDL_CreateTexture(sdlRender, SDL_PIXELFORMAT_IYUV, SDL_TEXTUREACCESS_STREAMING, frame_width, frame_height);
+    sdlTexture = SDL_CreateTexture(sdlRender, SDL_PIXELFORMAT_IYUV, SDL_TEXTUREACCESS_STREAMING, frame_width, frame_height);
 
     return success;
 }
@@ -480,7 +486,7 @@ void  fill_audio_pcm2(void* udata, Uint8* stream, int len) {
 
     if (audio_len == 0)
         return;
-    len = (len > audio_len ? audio_len : len);
+    len = (len > audio_len) ? (int)audio_len : len;
 
     SDL_MixAudio(stream, audio_pos, len, SDL_MIX_MAXVOLUME);
     audio_len -= len;
@@ -490,11 +496,10 @@ void  fill_audio_pcm2(void* udata, Uint8* stream, int len) {
 
 void closeSDL()
 {
-
     SDL_DestroyWindow(sdlWindow);
     sdlWindow = nullptr;
     SDL_DestroyRenderer(sdlRender);
     sdlRender = nullptr;
-    SDL_DestroyTexture(sdlTtexture);
-    sdlTtexture = nullptr;
+    SDL_DestroyTexture(sdlTexture);
+    sdlTexture = nullptr;
 }
