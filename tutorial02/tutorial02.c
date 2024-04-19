@@ -381,6 +381,15 @@ int main(int argc, char * argv[])
     avcodec_close(pCodecCtx);
     avformat_close_input(&pFormatCtx);
 
+    while (1)
+    {
+        SDL_PollEvent(&event);
+        if (event.type == SDL_QUIT)
+        {
+            break;
+        }
+        SDL_Delay(2);
+    }
     SDL_DestroyRenderer(renderer);
     SDL_Quit();
 

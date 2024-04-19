@@ -459,7 +459,7 @@ void saveFrame(AVFrame *avFrame, int width, int height, int frameIndex)
      */
 
     // Open file
-    sprintf(szFilename, "frame%d.ppm", frameIndex);
+    sprintf(szFilename, "tutorial01/frame%d.ppm", frameIndex);
     pFile = fopen(szFilename, "wb");
     if (pFile == NULL)
     {
