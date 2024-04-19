@@ -6,7 +6,9 @@ cmake_minimum_required(VERSION 3.11)
 ##
 # FFmpeg-Video-Player C Project CMakeLists.txt.
 ##
-project(FFmpeg_Video_Player C)
+project(FFmpeg_Video_Player)
+
+add_compile_options("$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
 
 set(CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/libs")
 
@@ -25,6 +27,10 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
 add_compile_definitions(SDL_MAIN_HANDLED)
+
+add_executable(Player player.cpp)
+target_include_directories(Player PRIVATE ${FFMPEG_INCLUDE_DIRS})
+target_link_libraries(Player PRIVATE ${SDL2_LIBRARIES} ${FFMPEG_LIBRARIES})
 
 ##
 # Add subdirectories to the build.
