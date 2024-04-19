@@ -4,6 +4,8 @@
 
 #include <iostream>
 #include <cstdio>
+#include <vector>
+#include <atomic>
 
 #include "SDL.h"
 
@@ -36,7 +38,7 @@ enum {
 };
 
 static  Uint8* audio_chunk;
-static  Uint32  audio_len;
+static  std::atomic_uint32_t audio_len;
 static  Uint8* audio_pos;
 
 SDL_Window* sdlWindow = nullptr;
@@ -47,7 +49,6 @@ SDL_Texture* sdlTexture = nullptr;
 AVFormatContext* ifmt_ctx = nullptr;
 AVPacket* pkt;
 AVFrame* video_frame, * audio_frame;
-int ret;
 int videoIndex = -1, audioIndex = -1;
 
 int frame_width = 1280;
@@ -55,7 +56,7 @@ int frame_height = 720;
 
 //视频解码
 const AVCodec* video_codec = nullptr;
-AVCodecContext* video_codecContent = nullptr;
+AVCodecContext* video_codecContext = nullptr;
 
 typedef struct video_pic
 {
@@ -71,7 +72,7 @@ int pic_count = 0; //以存储图片数量
 
 //音频解码
 const AVCodec* audio_codec = nullptr;
-AVCodecContext* audio_codecContent = nullptr;
+AVCodecContext* audio_codecContext = nullptr;
 
 //视频帧队列
 PacketQueue video_pkt_queue;
@@ -167,15 +168,17 @@ int video_play_thread(void * data)
 
     double fps = av_q2d(ifmt_ctx->streams[videoIndex]->r_frame_rate);
     double frameDuration = 1000.0/fps; // milliseconds
+    bool finish = false;
+    int ret;
 
     //取数据
-    while (true)
+    while (!finish)
     {
         //取数据包
 
         packet_queue_get(&video_pkt_queue, &video_packet);
 
-        ret = avcodec_send_packet(video_codecContent, &video_packet);
+        ret = avcodec_send_packet(video_codecContext, &video_packet);
         if (ret < 0) {
             fprintf(stderr, "Error sending a packet for decoding, %s\n", av_err2str(ret));
             continue;
@@ -183,9 +186,16 @@ int video_play_thread(void * data)
 
         while (ret >= 0)
         {
-            ret = avcodec_receive_frame(video_codecContent, video_frame);
-            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+            ret = avcodec_receive_frame(video_codecContext, video_frame);
+            if (ret == AVERROR(EOF))
+            {
+                finish = true;
                 break;
+            }
+            else if (ret == AVERROR(EAGAIN))
+            {
+                break;
+            }
             else if (ret < 0)
             {
                 fprintf(stderr, "Error during decoding\n");
@@ -194,7 +204,7 @@ int video_play_thread(void * data)
             //printf(" frame num %3d\n", video_codecContent->frame_number);
             fflush(stdout);
 
-            video_clock = frameDuration * static_cast<double>(video_codecContent->frame_num);
+            video_clock = frameDuration * static_cast<double>(video_codecContext->frame_num);
             //printf("视频帧pts: %f ms\n", video_clock);
 
             SDL_UpdateYUVTexture(sdlTexture, nullptr,
@@ -206,7 +216,7 @@ int video_play_thread(void * data)
             //清理渲染器缓冲区
             SDL_RenderClear(sdlRender);
             //将纹理拷贝到窗口渲染平面上
-            SDL_RenderCopy(sdlRender, sdlTexture, NULL, nullptr);
+            SDL_RenderCopy(sdlRender, sdlTexture, nullptr, nullptr);
             //翻转缓冲区，前台显示
             SDL_RenderPresent(sdlRender);
 
@@ -220,25 +230,28 @@ int video_play_thread(void * data)
             else if (diff < -frameDuration) //视频时钟比音频时钟慢，且超出一帧时间，立即播放当前帧
                 delay = 1;
 
-            printf("帧数：%lld 延时: %f ms\n", video_codecContent->frame_num, delay);
+            printf("帧数：%lld 延时: %f ms\n", video_codecContext->frame_num, delay);
 
             SDL_Delay( static_cast<uint32_t>(delay));
         }
     }
-
+    av_frame_unref(video_frame);
+    return 0;
 }
 
 int audio_play_thread(void* data)
 {
-    AVPacket audio_packt = { 0 };
+    AVPacket audio_packet{};
+    bool finish = false;
+    int ret;
 
-    while (true)
+    while (!finish)
     {
-        packet_queue_get(&audio_pkt_queue, &audio_packt);
+        packet_queue_get(&audio_pkt_queue, &audio_packet);
 
-        ret = avcodec_send_packet(audio_codecContent, &audio_packt);
+        ret = avcodec_send_packet(audio_codecContext, &audio_packet);
         if (ret < 0) {
-            fprintf(stderr, "Error submitting the packet to the decoder\n");
+            SDL_LogError(0, "Error submitting the packet to the decoder");
             exit(1);
         }
 
@@ -246,36 +259,41 @@ int audio_play_thread(void* data)
         /* read all the output frames (in general there may be any number of them */
         while (ret >= 0) {
             //接到解码后的<AVPacket数据>，读取到AVFrame中
-            ret = avcodec_receive_frame(audio_codecContent, audio_frame);
-            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+            ret = avcodec_receive_frame(audio_codecContext, audio_frame);
+            if (ret == AVERROR(EOF))
+            {
+                finish = true;
                 break;
+            }
+            else if (ret == AVERROR(EAGAIN))
+            {
+                break;
+            }
             else if (ret < 0) {
-                fprintf(stderr, "Error during decoding\n");
+                SDL_LogError(0, "Error during decoding");
                 break;
             }
             /*下面是得到解码后的裸流数据进行处理，根据裸流数据的特征做相应的处理，如AAC解码后是PCM，h264解码后是YUV等。*/
-            int data_size = av_get_bytes_per_sample(audio_codecContent->sample_fmt);
+            int data_size = av_get_bytes_per_sample(audio_codecContext->sample_fmt);
             if (data_size < 0) {
                 /* This should not occur, checking just for paranoia */
-                fprintf(stderr, "Failed to calculate data size\n");
+                SDL_LogError(0, "Failed to calculate data size");
                 break;
             }
 
             //转换为packed模式
-            int pcm_buffer_size = data_size * audio_frame->nb_samples * audio_codecContent->channels;
-            uint8_t* pcm_buffer = (uint8_t*)malloc(pcm_buffer_size);
+            int pcm_buffer_size = data_size * audio_frame->nb_samples * audio_codecContext->ch_layout.nb_channels;
+            auto pcm_buffer = (uint8_t*)malloc(pcm_buffer_size);
             memset(pcm_buffer, 0, pcm_buffer_size);
 
             fltp_convert_to_f32le((float*)pcm_buffer, (float*)audio_frame->data[0], (float*)audio_frame->data[1],
-                                  audio_frame->nb_samples, audio_codecContent->channels);
+                                  audio_frame->nb_samples, audio_codecContext->ch_layout.nb_channels);
             //使用SDL播放
-            //Set audio buffer (PCM data)
-            audio_chunk = pcm_buffer;//(Uint8*)audio_frame->data[0];
             audio_chunk = pcm_buffer;
             audio_len = pcm_buffer_size;
             audio_pos = audio_chunk;
 
-            audio_clock = audio_frame->pts * av_q2d(audio_codecContent->time_base) * 1000 ;
+            audio_clock = static_cast<double>(audio_frame->pts) * av_q2d(audio_codecContext->time_base) * 1000.0f ;
             //printf("音频帧pts: %f ms\n", audio_clock);
 
             while (audio_len > 0)//Wait until finish
@@ -284,7 +302,10 @@ int audio_play_thread(void* data)
             //SDL_Delay(1000);
             free(pcm_buffer);
         }
+        SDL_Delay(1);
     }
+    av_frame_unref(audio_frame);
+    return 0;
 }
 
 int open_file_thread(void* data)
@@ -319,14 +340,15 @@ int main(int argc, char * argv[])
         return -1;
     }
     const char* in_filename = argv[1];
+    int ret;
 
     if ((ret = avformat_open_input(&ifmt_ctx, in_filename, nullptr, nullptr)) < 0) {
-        SDL_LogError(0, "Could not open input file.");
+        SDL_LogError(0, "Could not open input file. error:%s", av_err2str(ret));
         return -1;
     }
 
     if ((ret = avformat_find_stream_info(ifmt_ctx, nullptr)) < 0) {
-        SDL_LogError(0, "Failed to retrieve input stream information");
+        SDL_LogError(0, "Failed to retrieve input stream information!! error: %s", av_err2str(ret));
         return -1;
     }
 
@@ -346,14 +368,14 @@ int main(int argc, char * argv[])
     video_codec = avcodec_find_decoder(ifmt_ctx->streams[videoIndex]->codecpar->codec_id);
 
     //分配解码器上下文
-    video_codecContent = avcodec_alloc_context3(video_codec);
+    video_codecContext = avcodec_alloc_context3(video_codec);
     //拷贝视频流信息到视频编码器上下文中
-    avcodec_parameters_to_context(video_codecContent, ifmt_ctx->streams[videoIndex]->codecpar);
+    avcodec_parameters_to_context(video_codecContext, ifmt_ctx->streams[videoIndex]->codecpar);
 
     frame_width = ifmt_ctx->streams[videoIndex]->codecpar->width;
     frame_height = ifmt_ctx->streams[videoIndex]->codecpar->height;
     //打开视频解码器和关联解码器上下文
-    if (avcodec_open2(video_codecContent, video_codec, nullptr))
+    if (avcodec_open2(video_codecContext, video_codec, nullptr))
     {
         SDL_LogError(0, "could not open codec!\n");
         return -1;
@@ -363,11 +385,11 @@ int main(int argc, char * argv[])
     audio_codec = avcodec_find_decoder(ifmt_ctx->streams[audioIndex]->codecpar->codec_id);
 
     //分配解码器上下文
-    audio_codecContent = avcodec_alloc_context3(audio_codec);
+    audio_codecContext = avcodec_alloc_context3(audio_codec);
     //拷贝音频流信息到音频编码器上下文中
-    avcodec_parameters_to_context(audio_codecContent, ifmt_ctx->streams[audioIndex]->codecpar);
+    avcodec_parameters_to_context(audio_codecContext, ifmt_ctx->streams[audioIndex]->codecpar);
     //打开音频解码器和关联解码器上下文
-    if (avcodec_open2(audio_codecContent, audio_codec, nullptr))
+    if (avcodec_open2(audio_codecContext, audio_codec, nullptr))
     {
         printf("could not open codec!\n");
         return -1;
@@ -388,11 +410,11 @@ int main(int argc, char * argv[])
     audio_pkt_queue.mutex = SDL_CreateMutex();
 
     //设置SDL音频播放参数
-    wanted_spec.freq = audio_codecContent->sample_rate; //采样率
+    wanted_spec.freq = audio_codecContext->sample_rate; //采样率
     wanted_spec.format = AUDIO_F32LSB; // audio_codecContent->sample_fmt;  这里需要转换为sdl的采样格式
-    wanted_spec.channels = audio_codecContent->ch_layout.nb_channels; //通道数
+    wanted_spec.channels = audio_codecContext->ch_layout.nb_channels; //通道数
     wanted_spec.silence = 0;
-    wanted_spec.samples = audio_codecContent->frame_size;   //每一帧的采样点数量
+    wanted_spec.samples = audio_codecContext->frame_size;   //每一帧的采样点数量
     wanted_spec.callback = fill_audio_pcm2; //音频播放回调
 
     //打开系统音频设备
@@ -428,8 +450,8 @@ int main(int argc, char * argv[])
 
     //释放ffmpeg指针
     avformat_close_input(&ifmt_ctx);
-    avcodec_free_context(&video_codecContent);
-    avcodec_free_context(&audio_codecContent);
+    avcodec_free_context(&video_codecContext);
+    avcodec_free_context(&audio_codecContext);
     av_frame_free(&audio_frame);
     av_frame_free(&video_frame);
     av_packet_free(&pkt);
@@ -453,7 +475,8 @@ int initSdl()
     }
 
     //创建window
-    sdlWindow = SDL_CreateWindow("decode video", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, frame_width, frame_height, SDL_WINDOW_SHOWN);
+    sdlWindow = SDL_CreateWindow("decode video", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                                 frame_width, frame_height, SDL_WINDOW_SHOWN);
     if (sdlWindow == nullptr)
     {
         printf("create window error: %s\n", SDL_GetError());
@@ -488,8 +511,11 @@ void  fill_audio_pcm2(void* udata, Uint8* stream, int len) {
         return;
     len = (len > audio_len) ? (int)audio_len : len;
 
-    SDL_MixAudio(stream, audio_pos, len, SDL_MIX_MAXVOLUME);
+    SDL_memcpy(stream, audio_pos, len);
+
+//    SDL_MixAudio(stream, audio_pos, len, SDL_MIX_MAXVOLUME);
     audio_len -= len;
+    audio_pos += len;
 
 
 }
