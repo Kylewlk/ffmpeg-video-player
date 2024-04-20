@@ -37,14 +37,13 @@ enum {
     AV_SYNC_EXTERNAL_CLOCK, /* synchronize to an external clock */
 };
 
-static  Uint8* audio_chunk;
-static  std::atomic_uint32_t audio_len;
-static  Uint8* audio_pos;
+static  Uint8* audio_chunk{};
+static  std::atomic_uint32_t audio_len{0};
+static  Uint8* audio_pos{};
 
 SDL_Window* sdlWindow = nullptr;
 SDL_Renderer* sdlRender = nullptr;
 SDL_Texture* sdlTexture = nullptr;
-
 
 AVFormatContext* ifmt_ctx = nullptr;
 AVPacket* pkt;
@@ -211,14 +210,6 @@ int video_play_thread(void * data)
                                  video_frame->data[0], video_frame->linesize[0],
                                  video_frame->data[1], video_frame->linesize[1],
                                  video_frame->data[2], video_frame->linesize[2]);
-
-
-            //清理渲染器缓冲区
-            SDL_RenderClear(sdlRender);
-            //将纹理拷贝到窗口渲染平面上
-            SDL_RenderCopy(sdlRender, sdlTexture, nullptr, nullptr);
-            //翻转缓冲区，前台显示
-            SDL_RenderPresent(sdlRender);
 
             //延时处理
             double delay = frameDuration;
@@ -433,6 +424,13 @@ int main(int argc, char * argv[])
     SDL_Event e;
     while (!quit)
     {
+        //清理渲染器缓冲区
+        SDL_RenderClear(sdlRender);
+        //将纹理拷贝到窗口渲染平面上
+        SDL_RenderCopy(sdlRender, sdlTexture, nullptr, nullptr);
+        //翻转缓冲区，前台显示
+        SDL_RenderPresent(sdlRender);
+
         while (SDL_PollEvent(&e) != 0)
         {
             if (e.type == SDL_QUIT)
@@ -476,7 +474,7 @@ int initSdl()
 
     //创建window
     sdlWindow = SDL_CreateWindow("decode video", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                 frame_width, frame_height, SDL_WINDOW_SHOWN);
+                                 frame_width, frame_height, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
     if (sdlWindow == nullptr)
     {
         printf("create window error: %s\n", SDL_GetError());
@@ -484,7 +482,7 @@ int initSdl()
     }
 
     //创建渲染器
-    sdlRender = SDL_CreateRenderer(sdlWindow, -1, 0);
+    sdlRender = SDL_CreateRenderer(sdlWindow, -1, SDL_RENDERER_ACCELERATED|SDL_RENDERER_PRESENTVSYNC);
     if (sdlRender == nullptr)
     {
         printf("init window Render error: %s\n", SDL_GetError());
