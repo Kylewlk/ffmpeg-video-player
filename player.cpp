@@ -44,6 +44,9 @@ static  Uint8* audio_pos{};
 SDL_Window* sdlWindow = nullptr;
 SDL_Renderer* sdlRender = nullptr;
 SDL_Texture* sdlTexture = nullptr;
+AVFrame textureFrame{};
+std::atomic<bool> isFramePrepared{false};
+std::atomic<bool> quit{false};
 
 AVFormatContext* ifmt_ctx = nullptr;
 AVPacket* pkt;
@@ -183,7 +186,7 @@ int video_play_thread(void * data)
             continue;
         }
 
-        while (ret >= 0)
+        while (ret >= 0 && !quit)
         {
             ret = avcodec_receive_frame(video_codecContext, video_frame);
             if (ret == AVERROR(EOF))
@@ -206,10 +209,11 @@ int video_play_thread(void * data)
             video_clock = frameDuration * static_cast<double>(video_codecContext->frame_num);
             //printf("视频帧pts: %f ms\n", video_clock);
 
-            SDL_UpdateYUVTexture(sdlTexture, nullptr,
-                                 video_frame->data[0], video_frame->linesize[0],
-                                 video_frame->data[1], video_frame->linesize[1],
-                                 video_frame->data[2], video_frame->linesize[2]);
+            if (!isFramePrepared)
+            {
+                av_frame_move_ref(&textureFrame, video_frame);
+                isFramePrepared = true;
+            }
 
             //延时处理
             double delay = frameDuration;
@@ -236,7 +240,7 @@ int audio_play_thread(void* data)
     bool finish = false;
     int ret;
 
-    while (!finish)
+    while (!finish && !quit)
     {
         packet_queue_get(&audio_pkt_queue, &audio_packet);
 
@@ -420,10 +424,19 @@ int main(int argc, char * argv[])
     SDL_CreateThread(video_play_thread, "video_play", nullptr);
     SDL_CreateThread(audio_play_thread, "audio_play", nullptr);
 
-    bool quit = false;
     SDL_Event e;
     while (!quit)
     {
+        if (isFramePrepared)
+        {
+            SDL_UpdateYUVTexture(sdlTexture, nullptr,
+                                 textureFrame.data[0], textureFrame.linesize[0],
+                                 textureFrame.data[1], textureFrame.linesize[1],
+                                 textureFrame.data[2], textureFrame.linesize[2]);
+            av_frame_unref(&textureFrame);
+            isFramePrepared = false;
+        }
+
         //清理渲染器缓冲区
         SDL_RenderClear(sdlRender);
         //将纹理拷贝到窗口渲染平面上
@@ -445,6 +458,8 @@ int main(int argc, char * argv[])
 
     SDL_DestroyMutex(video_pkt_queue.mutex);
     SDL_DestroyMutex(audio_pkt_queue.mutex);
+
+    av_frame_unref(&textureFrame);
 
     //释放ffmpeg指针
     avformat_close_input(&ifmt_ctx);
