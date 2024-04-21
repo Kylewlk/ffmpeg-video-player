@@ -174,7 +174,7 @@ int video_play_thread(void * data)
     int ret;
 
     //取数据
-    while (!finish)
+    while (!finish && !quit)
     {
         //取数据包
 
@@ -252,7 +252,7 @@ int audio_play_thread(void* data)
 
 
         /* read all the output frames (in general there may be any number of them */
-        while (ret >= 0) {
+        while (ret >= 0 && !quit) {
             //接到解码后的<AVPacket数据>，读取到AVFrame中
             ret = avcodec_receive_frame(audio_codecContext, audio_frame);
             if (ret == AVERROR(EOF))

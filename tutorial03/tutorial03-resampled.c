@@ -29,7 +29,6 @@
 #include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
 #include <SDL.h>
-#include <SDL_thread.h>
 
 /* Prevents SDL from overriding main() */
 #ifdef __MINGW32__
@@ -105,7 +104,7 @@ static int audio_resampling(
 int main(int argc, char * argv[])
 {
     // if the given number of command line arguments is wrong,
-    if ( !(argc == 3) )
+    if (argc != 3)
     {
         // print help menu and exit
         printHelpMenu();
@@ -114,9 +113,9 @@ int main(int argc, char * argv[])
 
     // parse max frames to decode input from command line args
     int maxFramesToDecode = -1;
-    sscanf(argv[2], "%d", &maxFramesToDecode);
+    sscanf_s(argv[2], "%d", &maxFramesToDecode);
 
-    int ret = -1;
+    int ret;
 
     /**
      * Initialize SDL.
@@ -183,8 +182,7 @@ int main(int argc, char * argv[])
     }
 
     // retrieve audio codec
-    AVCodec * aCodec = NULL;
-    aCodec = avcodec_find_decoder(pFormatCtx->streams[audioStream]->codecpar->codec_id);
+    const AVCodec * aCodec = avcodec_find_decoder(pFormatCtx->streams[audioStream]->codecpar->codec_id);
     if (aCodec == NULL)
     {
         printf("Unsupported codec!\n");
@@ -202,8 +200,8 @@ int main(int argc, char * argv[])
     }
 
     // audio specs containers
-    SDL_AudioSpec wanted_specs = {};
-    SDL_AudioSpec specs = {};
+    SDL_AudioSpec wanted_specs;
+    SDL_AudioSpec specs;
 
     // set audio settings from codec info
     wanted_specs.freq = aCodecCtx->sample_rate;
@@ -228,7 +226,7 @@ int main(int argc, char * argv[])
                           0,
                           &wanted_specs,
                           &specs,
-                          SDL_AUDIO_ALLOW_FORMAT_CHANGE
+                          0
                       );
 
     // SDL_OpenAudioDevice returns a valid device ID that is > 0 on success or 0 on failure
@@ -253,8 +251,7 @@ int main(int argc, char * argv[])
     SDL_PauseAudioDevice(audioDeviceID, 0);   // [2]
 
     // retrieve video codec
-    AVCodec * pCodec = NULL;
-    pCodec = avcodec_find_decoder(pFormatCtx->streams[videoStream]->codecpar->codec_id);
+    const AVCodec * pCodec = avcodec_find_decoder(pFormatCtx->streams[videoStream]->codecpar->codec_id);
     if (pCodec == NULL)
     {
         printf("Unsupported codec!\n");
@@ -396,7 +393,7 @@ int main(int argc, char * argv[])
                 return -1;
             }
 
-            while (ret >= 0)
+            while (1)
             {
                 // get decoded output data from decoder
                 ret = avcodec_receive_frame(pCodecCtx, pFrame);
@@ -433,12 +430,11 @@ int main(int argc, char * argv[])
 
                     // dump information about the frame being rendered
                     printf(
-                        "Frame %c (%d) pts %d dts %d key_frame %d [coded_picture_number %d, display_picture_number %d, %dx%d]\n",
+                        "Frame %c (%lld) pts %lld dts %lld [coded_picture_number %d, display_picture_number %d, %dx%d]\n",
                         av_get_picture_type_char(pFrame->pict_type),
-                        pCodecCtx->frame_number,
+                        pCodecCtx->frame_num,
                         pFrame->pts,
                         pFrame->pkt_dts,
-                        pFrame->key_frame,
                         pFrame->coded_picture_number,
                         pFrame->display_picture_number,
                         pCodecCtx->width,
@@ -729,11 +725,6 @@ static int packet_queue_get(PacketQueue * q, AVPacket * pkt, int block)
             ret = 1;
             break;
         }
-        else if (!block)
-        {
-            ret = 0;
-            break;
-        }
         else
         {
             // unlock mutex and wait for cond signal, then lock mutex again
@@ -846,7 +837,7 @@ int audio_decode_frame(AVCodecContext * aCodecCtx, uint8_t * audio_buf, int buf_
     }
 
     int len1 = 0;
-    int data_size = 0;
+    int data_size;
 
     for (;;)
     {
@@ -861,7 +852,6 @@ int audio_decode_frame(AVCodecContext * aCodecCtx, uint8_t * audio_buf, int buf_
             int got_frame = 0;
 
             // [5]
-            // len1 = avcodec_decode_audio4(aCodecCtx, avFrame, &got_frame, avPacket);
             int ret = avcodec_receive_frame(aCodecCtx, avFrame);
             if (ret == 0)
             {
@@ -978,7 +968,7 @@ static int audio_resampling(                                  // 1
 
     SwrContext * swr_ctx = NULL;
     int ret = 0;
-    int64_t in_channel_layout = audio_decode_ctx->channel_layout;
+    int64_t in_channel_layout = audio_decode_ctx->ch_layout.nb_channels;
     int64_t out_channel_layout = AV_CH_LAYOUT_STEREO;
     int out_nb_channels = 0;
     int out_linesize = 0;
@@ -997,11 +987,11 @@ static int audio_resampling(                                  // 1
     }
 
     // get input audio channels
-//    in_channel_layout = (audio_decode_ctx->channels ==
-//                     av_get_channel_layout_nb_channels(audio_decode_ctx->channel_layout)) ?   // 2
-//                     audio_decode_ctx->channel_layout :
-//                     av_get_default_channel_layout(audio_decode_ctx->channels);
-    in_channel_layout = av_channel_layout_check(&audio_decode_ctx->ch_layout);
+    in_channel_layout = (audio_decode_ctx->channels ==
+                     av_get_channel_layout_nb_channels(audio_decode_ctx->channel_layout)) ?   // 2
+                     audio_decode_ctx->channel_layout :
+                     av_get_default_channel_layout(audio_decode_ctx->channels);
+    // in_channel_layout = AV_CH_LAYOUT_STEREO;
 
     // check input audio channels correctly retrieved
     if (in_channel_layout <= 0)
