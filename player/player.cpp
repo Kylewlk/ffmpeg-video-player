@@ -181,6 +181,7 @@ int video_play_thread(void * data)
         packet_queue_get(&video_pkt_queue, &video_packet);
 
         ret = avcodec_send_packet(video_codecContext, &video_packet);
+        av_packet_unref(&video_packet);
         if (ret < 0) {
             fprintf(stderr, "Error sending a packet for decoding, %s\n", av_err2str(ret));
             continue;
@@ -245,6 +246,7 @@ int audio_play_thread(void* data)
         packet_queue_get(&audio_pkt_queue, &audio_packet);
 
         ret = avcodec_send_packet(audio_codecContext, &audio_packet);
+        av_packet_unref(&audio_packet);
         if (ret < 0) {
             SDL_LogError(0, "Error submitting the packet to the decoder");
             exit(1);
