@@ -28,10 +28,6 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
 add_compile_definitions(SDL_MAIN_HANDLED)
 
-add_executable(Player player.cpp)
-target_include_directories(Player PRIVATE ${FFMPEG_INCLUDE_DIRS})
-target_link_libraries(Player PRIVATE ${SDL2_LIBRARIES} ${FFMPEG_LIBRARIES})
-
 ##
 # Add subdirectories to the build.
 ##

@@ -20,7 +20,6 @@
 *
 **/
 
-#include <unistd.h>
 #include <stdio.h>
 #include <assert.h>
 #include <math.h>
@@ -31,8 +30,8 @@
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
-#include <SDL2/SDL.h>
-#include <SDL2/SDL_thread.h>
+#include <SDL.h>
+#include <SDL_thread.h>
 
 /**
  * Prevents SDL from overriding main().

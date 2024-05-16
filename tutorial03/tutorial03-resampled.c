@@ -56,6 +56,11 @@ PacketQueue audioq;
 
 // global quit flag
 int quit = 0;
+SwrContext * swr_ctx = NULL;
+const int deviceFreq = 48000;
+const int deviceChannels = 2;
+enum AVSampleFormat deviceSampleFormat = AV_SAMPLE_FMT_S16;
+AVChannelLayout deviceLayout = AV_CHANNEL_LAYOUT_STEREO;
 
 void printHelpMenu();
 
@@ -87,9 +92,6 @@ int audio_decode_frame(
 static int audio_resampling(
               AVCodecContext * audio_decode_ctx,
               AVFrame * decoded_audio_frame,
-              enum AVSampleFormat out_sample_fmt,
-              int out_channels,
-              int out_sample_rate,
               uint8_t * out_buf
           );
 
@@ -199,14 +201,22 @@ int main(int argc, char * argv[])
         return -1;
     }
 
+    // initialize the audio AVCodecContext to use the given audio AVCodec
+    ret = avcodec_open2(aCodecCtx, aCodec, NULL);
+    if (ret < 0)
+    {
+        printf("Could not open audio codec.\n");
+        return -1;
+    }
+
     // audio specs containers
     SDL_AudioSpec wanted_specs;
     SDL_AudioSpec specs;
 
     // set audio settings from codec info
-    wanted_specs.freq = aCodecCtx->sample_rate;
+    wanted_specs.freq = deviceFreq;
     wanted_specs.format = AUDIO_S16SYS;
-    wanted_specs.channels = aCodecCtx->ch_layout.nb_channels;
+    wanted_specs.channels = deviceChannels;
     wanted_specs.silence = 0;
     wanted_specs.samples = SDL_AUDIO_BUFFER_SIZE;
     wanted_specs.callback = audio_callback;
@@ -233,14 +243,6 @@ int main(int argc, char * argv[])
     if (audioDeviceID == 0)
     {
         printf("Failed to open audio device: %s.\n", SDL_GetError());
-        return -1;
-    }
-
-    // initialize the audio AVCodecContext to use the given audio AVCodec
-    ret = avcodec_open2(aCodecCtx, aCodec, NULL);
-    if (ret < 0)
-    {
-        printf("Could not open audio codec.\n");
         return -1;
     }
 
@@ -526,16 +528,19 @@ int main(int argc, char * argv[])
     /**
     * Memory Cleanup.
     */
-//    av_packet_unref(pPacket);
+    av_packet_unref(pPacket);
 
     av_frame_free(&pict);
-    av_free(pict);
-
     av_frame_free(&pFrame);
-    av_free(pFrame);
 
-//    avcodec_close(pCodecCtx);
-//    avcodec_close(aCodecCtx);
+    avcodec_free_context(&pCodecCtx);
+    avcodec_free_context(&aCodecCtx);
+
+    if (swr_ctx)
+    {
+        // Free the given SwrContext and set the pointer to NULL
+        swr_free(&swr_ctx);
+    }
 
     avformat_close_input(&pFormatCtx);
 
@@ -896,9 +901,6 @@ int audio_decode_frame(AVCodecContext * aCodecCtx, uint8_t * audio_buf, int buf_
                 data_size = audio_resampling(
                                 aCodecCtx,
                                 avFrame,
-                                AV_SAMPLE_FMT_S16,
-                                aCodecCtx->channels,
-                                aCodecCtx->sample_rate,
                                 audio_buf
                             );
 //                data_size = avFrame->linesize[0];
@@ -954,9 +956,6 @@ int audio_decode_frame(AVCodecContext * aCodecCtx, uint8_t * audio_buf, int buf_
 static int audio_resampling(                                  // 1
                         AVCodecContext * audio_decode_ctx,
                         AVFrame * decoded_audio_frame,
-                        enum AVSampleFormat out_sample_fmt,
-                        int out_channels,
-                        int out_sample_rate,
                         uint8_t * out_buf
                       )
 {
@@ -966,52 +965,38 @@ static int audio_resampling(                                  // 1
         return -1;
     }
 
-    SwrContext * swr_ctx = NULL;
     int ret = 0;
-    int64_t in_channel_layout = audio_decode_ctx->ch_layout.nb_channels;
-    int64_t out_channel_layout = AV_CH_LAYOUT_STEREO;
-    int out_nb_channels = 0;
     int out_linesize = 0;
     int in_nb_samples = 0;
     int out_nb_samples = 0;
-    int max_out_nb_samples = 0;
     uint8_t ** resampled_data = NULL;
     int resampled_data_size = 0;
 
-    swr_ctx = swr_alloc();
+    if (swr_ctx == NULL)
+    {
+        swr_ctx = swr_alloc();
+
+        av_opt_set_chlayout(swr_ctx, "in_chlayout",    &audio_decode_ctx->ch_layout, 0);
+        av_opt_set_int(swr_ctx, "in_sample_rate",       audio_decode_ctx->sample_rate, 0);
+        av_opt_set_sample_fmt(swr_ctx, "in_sample_fmt", audio_decode_ctx->sample_fmt, 0);
+
+        av_opt_set_chlayout(swr_ctx, "out_chlayout",    &deviceLayout, 0);
+        av_opt_set_int(swr_ctx, "out_sample_rate",       deviceFreq, 0);
+        av_opt_set_sample_fmt(swr_ctx, "out_sample_fmt", deviceSampleFormat, 0);
+
+        ret = swr_init(swr_ctx);
+        if (ret < 0) {
+            printf("Failed to initialize the resampling context, Error:%s", av_err2str(ret));
+            swr_free(&swr_ctx);
+            return -1;
+        }
+
+    }
 
     if (!swr_ctx)
     {
-        printf("swr_alloc error.\n");
+        printf("swr_ctx is NULL.\n");
         return -1;
-    }
-
-    // get input audio channels
-    in_channel_layout = (audio_decode_ctx->channels ==
-                     av_get_channel_layout_nb_channels(audio_decode_ctx->channel_layout)) ?   // 2
-                     audio_decode_ctx->channel_layout :
-                     av_get_default_channel_layout(audio_decode_ctx->channels);
-    // in_channel_layout = AV_CH_LAYOUT_STEREO;
-
-    // check input audio channels correctly retrieved
-    if (in_channel_layout <= 0)
-    {
-        printf("in_channel_layout error.\n");
-        return -1;
-    }
-
-    // set output audio channels based on the input audio channels
-    if (out_channels == 1)
-    {
-        out_channel_layout = AV_CH_LAYOUT_MONO;
-    }
-    else if (out_channels == 2)
-    {
-        out_channel_layout = AV_CH_LAYOUT_STEREO;
-    }
-    else
-    {
-        out_channel_layout = AV_CH_LAYOUT_SURROUND;
     }
 
     // retrieve number of audio samples (per channel)
@@ -1022,86 +1007,25 @@ static int audio_resampling(                                  // 1
         return -1;
     }
 
-    // Set SwrContext parameters for resampling
-    av_opt_set_int(   // 3
-        swr_ctx,
-        "in_channel_layout",
-        in_channel_layout,
-        0
-    );
-
-    // Set SwrContext parameters for resampling
-    av_opt_set_int(
-        swr_ctx,
-        "in_sample_rate",
-        audio_decode_ctx->sample_rate,
-        0
-    );
-
-    // Set SwrContext parameters for resampling
-    av_opt_set_sample_fmt(
-        swr_ctx,
-        "in_sample_fmt",
-        audio_decode_ctx->sample_fmt,
-        0
-    );
-
-    // Set SwrContext parameters for resampling
-    av_opt_set_int(
-        swr_ctx,
-        "out_channel_layout",
-        out_channel_layout,
-        0
-    );
-
-    // Set SwrContext parameters for resampling
-    av_opt_set_int(
-        swr_ctx,
-        "out_sample_rate",
-        out_sample_rate,
-        0
-    );
-
-    // Set SwrContext parameters for resampling
-    av_opt_set_sample_fmt(
-        swr_ctx,
-        "out_sample_fmt",
-        out_sample_fmt,
-        0
-    );
-
-    // Once all values have been set for the SwrContext, it must be initialized
-    // with swr_init().
-    ret = swr_init(swr_ctx);;
-    if (ret < 0)
-    {
-        printf("Failed to initialize the resampling context.\n");
-        return -1;
-    }
-
-    max_out_nb_samples = out_nb_samples = av_rescale_rnd(
-                                              in_nb_samples,
-                                              out_sample_rate,
-                                              audio_decode_ctx->sample_rate,
-                                              AV_ROUND_UP
+    out_nb_samples = (int)av_rescale_rnd(swr_get_delay(swr_ctx, audio_decode_ctx->sample_rate) + in_nb_samples,
+                                         deviceFreq,
+                                        audio_decode_ctx->sample_rate,
+                                        AV_ROUND_UP
                                           );
 
     // check rescaling was successful
-    if (max_out_nb_samples <= 0)
+    if (out_nb_samples <= 0)
     {
         printf("av_rescale_rnd error.\n");
         return -1;
     }
 
-    // get number of output audio channels
-    out_nb_channels = av_get_channel_layout_nb_channels(out_channel_layout);
-
     ret = av_samples_alloc_array_and_samples(
               &resampled_data,
               &out_linesize,
-              out_nb_channels,
+              deviceChannels,
               out_nb_samples,
-              out_sample_fmt,
+              deviceSampleFormat,
               0
           );
 
@@ -1109,46 +1033,6 @@ static int audio_resampling(                                  // 1
     {
         printf("av_samples_alloc_array_and_samples() error: Could not allocate destination samples.\n");
         return -1;
-    }
-
-    // retrieve output samples number taking into account the progressive delay
-    out_nb_samples = av_rescale_rnd(
-                        swr_get_delay(swr_ctx, audio_decode_ctx->sample_rate) + in_nb_samples,
-                        out_sample_rate,
-                        audio_decode_ctx->sample_rate,
-                        AV_ROUND_UP
-                     );
-
-    // check output samples number was correctly retrieved
-    if (out_nb_samples <= 0)
-    {
-        printf("av_rescale_rnd error\n");
-        return -1;
-    }
-
-    if (out_nb_samples > max_out_nb_samples)
-    {
-        // free memory block and set pointer to NULL
-        av_free(resampled_data[0]);
-
-        // Allocate a samples buffer for out_nb_samples samples
-        ret = av_samples_alloc(
-                  resampled_data,
-                  &out_linesize,
-                  out_nb_channels,
-                  out_nb_samples,
-                  out_sample_fmt,
-                  1
-              );
-
-        // check samples buffer correctly allocated
-        if (ret < 0)
-        {
-            printf("av_samples_alloc failed.\n");
-            return -1;
-        }
-
-        max_out_nb_samples = out_nb_samples;
     }
 
     if (swr_ctx)
@@ -1172,16 +1056,16 @@ static int audio_resampling(                                  // 1
         // Get the required buffer size for the given audio parameters
         resampled_data_size = av_samples_get_buffer_size(
                                   &out_linesize,
-                                  out_nb_channels,
+                                  deviceChannels,
                                   ret,
-                                  out_sample_fmt,
+                                  deviceSampleFormat,
                                   1
                               );
 
         // check audio buffer size
         if (resampled_data_size < 0)
         {
-            printf("av_samples_get_buffer_size error.\n");
+            printf("av_samples_get_buffer_size error. %s \n", av_err2str(resampled_data_size));
             return -1;
         }
     }
@@ -1205,12 +1089,6 @@ static int audio_resampling(                                  // 1
 
     av_freep(&resampled_data);
     resampled_data = NULL;
-
-    if (swr_ctx)
-    {
-        // Free the given SwrContext and set the pointer to NULL
-        swr_free(&swr_ctx);
-    }
 
     return resampled_data_size;
 }
